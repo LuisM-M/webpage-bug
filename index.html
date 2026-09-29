@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bug hunt guide: Express + cache repo</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#fbfaf7;--fg:#1f2328;--mut:#5b6169;--card:#fff;--bd:#d9d6cf;--badbg:#fdecea;--badbd:#e0817a;--badmk:#f5a9a3;--okbg:#e8f5ec;--okbd:#6fb586;--okmk:#a6dcb7;--tip:#fff6d6}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#16181b;--fg:#e7e9ec;--mut:#9aa1a9;--card:#1e2126;--bd:#3a3f46;--badbg:#3a1f1e;--badbd:#a5504b;--badmk:#8f3a35;--okbg:#182e21;--okbd:#3f8558;--okmk:#2c6b44;--tip:#3a3418}}
+:root[data-theme="dark"]{--bg:#16181b;--fg:#e7e9ec;--mut:#9aa1a9;--card:#1e2126;--bd:#3a3f46;--badbg:#3a1f1e;--badbd:#a5504b;--badmk:#8f3a35;--okbg:#182e21;--okbd:#3f8558;--okmk:#2c6b44;--tip:#3a3418}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 Georgia,"Times New Roman",serif}
+main{max-width:820px;margin:0 auto;padding:20px 16px 60px}
+h1{font:600 26px/1.2 system-ui,sans-serif;margin:8px 0}
+h2{font:600 20px/1.3 system-ui,sans-serif;margin:0 0 6px}
+h3{font:600 13px system-ui,sans-serif;margin:14px 0 6px;letter-spacing:.02em}
+p{margin:6px 0}.mut{color:var(--mut)}
+section{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px;margin:16px 0}
+.n{display:inline-block;background:var(--fg);color:var(--bg);font:600 13px system-ui;border-radius:4px;padding:1px 8px;margin-right:8px;vertical-align:2px}
+pre{margin:6px 0;padding:10px 12px;border-radius:6px;overflow-x:auto;font:13px/1.55 ui-monospace,Menlo,Consolas,monospace;border:1px solid}
+pre.bad{background:var(--badbg);border-color:var(--badbd)}
+pre.ok{background:var(--okbg);border-color:var(--okbd)}
+pre.bad::before{content:"WRONG";display:block;font:600 11px system-ui;color:var(--badbd);margin-bottom:4px}
+pre.ok::before{content:"RIGHT";display:block;font:600 11px system-ui;color:var(--okbd);margin-bottom:4px}
+pre.bad mark{background:var(--badmk);color:inherit;border-radius:2px;padding:0 2px;font-weight:700}
+pre.ok mark{background:var(--okmk);color:inherit;border-radius:2px;padding:0 2px;font-weight:700}
+.look{background:var(--tip);border-radius:6px;padding:8px 12px;font:14px/1.5 system-ui,sans-serif}
+ul{margin:4px 0;padding-left:20px}li{margin:3px 0;font:14px/1.5 system-ui,sans-serif}
+code{font:13px ui-monospace,Menlo,Consolas,monospace;background:var(--tip);padding:0 4px;border-radius:3px}
+.legend{display:flex;gap:8px;flex-wrap:wrap;font:13px system-ui;margin:10px 0}
+.legend span{padding:2px 10px;border-radius:12px;border:1px solid var(--bd)}
+</style></head><body><main>
+<h1>Bug hunt guide: what to check, in order</h1>
+<p class="mut">Work top to bottom. Fix one, run <code>npx jest</code>, then move on. Data bugs come first because wrong data gets cached and makes later bugs look different than they are.</p>
+<div class="legend"><span style="background:var(--badbg)">Red block = wrong code</span><span style="background:var(--okbg)">Green block = correct code</span><span style="background:var(--tip)">Yellow = what to look for</span><span>Bold highlight inside a block = the exact part that matters</span></div>
+
+<section><h2><span class="n">0</span>Before touching code</h2>
+<p class="look">Run <code>npx jest</code>. Read each failing test's name and the Expected vs Received lines. That is your spec. Then open the route file for the failing endpoint and follow it: route, then service or repository, then back.</p>
+<ul><li>File named <code>app_test.js</code>? Jest only finds <code>*.test.js</code>, <code>*.spec.js</code> or <code>__tests__/</code>. Rename it.</li><li><code>app.js</code> must end with <code>module.exports = app</code> and must not call <code>listen</code>. Only <code>server.js</code> does.</li></ul></section>
+
+<section><h2><span class="n">1</span>Repository: filters and total</h2>
+<p class="look">Look in: <code>repository.js</code> / the data layer. Symptoms: filter tests return everything; <code>total</code> is 4 when you expect 2.</p>
+<pre class="bad">let results = [...this.events];
+<mark>// no filters</mark>
+const offset = (page - 1) * limit;
+return { events: results.slice(offset, offset + limit),
+         total: <mark>this.events.length</mark> };   // counted before filtering</pre>
+<pre class="ok">let results = [...this.events];                       // copy, never mutate
+<mark>if (status)   results = results.filter(e =&gt; e.status === status);</mark>
+<mark>if (category) results = results.filter(e =&gt; e.category === category);</mark>
+<mark>const total = results.length;</mark>                        // AFTER filter, BEFORE slice
+const offset = (page - 1) * limit;
+return { events: results.slice(offset, offset + limit), total };</pre>
+<h3>Common mistakes</h3><ul>
+<li>Order wrong: filter, then count, then slice. Never count after slicing.</li>
+<li>Filter runs even when the param is missing (<code>filter(e =&gt; e.status === undefined)</code> returns nothing). Wrap in <code>if (param)</code>.</li>
+<li>Using <code>=</code> instead of <code>===</code>, or comparing different letter case.</li>
+<li><code>.sort()</code>, <code>.splice()</code> or <code>.reverse()</code> on <code>this.events</code> changes the original data.</li></ul></section>
+
+<section><h2><span class="n">2</span>Route: page and limit normalization</h2>
+<p class="look">Look in: the top of the GET handler. Symptoms: <code>limit=0</code> gives 11 instead of 1; <code>limit=250</code> not capped; negative page not fixed. Remember <code>req.query</code> values are strings.</p>
+<pre class="bad">const page  = Math.max(1, parseInt(req.query.page) <mark>|| 1</mark>);
+const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) <mark>|| 11</mark>));
+// 0 is falsy, so limit=0 falls back to the default. 11 also does not match the repo default of 10.</pre>
+<pre class="ok"><mark>const toInt = (v, fallback) =&gt; {
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? fallback : n;
+};</mark>
+const page  = Math.max(1, toInt(req.query.page, 1));
+const limit = Math.min(100, Math.max(1, toInt(req.query.limit, 10)));</pre>
+<h3>Common mistakes</h3><ul>
+<li>Forgetting <code>Math.max(1, ...)</code> on page, or <code>Math.min(100, ...)</code> on limit.</li>
+<li>Only clamping the max, so <code>limit=0</code> or <code>-5</code> still breaks.</li>
+<li>Defaults that disagree between route (11) and repository (10).</li>
+<li>Passing raw <code>req.query.page</code> (a string) to the repository instead of the clamped number.</li></ul></section>
+
+<section><h2><span class="n">3</span>Response: pagination fields</h2>
+<p class="look">Look in: where the response object is built. Test expects six fields with exact names.</p>
+<pre class="bad">pagination: {
+  page: <mark>page || 1</mark>,
+  limit: <mark>limit || 10</mark>,
+  total
+}   <mark>// totalPages, hasNextPage, hasPreviousPage missing</mark></pre>
+<pre class="ok">const totalPages = <mark>Math.ceil(total / limit)</mark>;
+pagination: {
+  page, limit, total,
+  <mark>totalPages,
+  hasNextPage: page &lt; totalPages,
+  hasPreviousPage: page &gt; 1</mark>
+}</pre>
+<h3>Common mistakes</h3><ul>
+<li><code>Math.floor</code> instead of <code>Math.ceil</code> (4 items, limit 3 must give 2 pages).</li>
+<li><code>hasNextPage: page &lt;= totalPages</code> (off by one; should be <code>&lt;</code>).</li>
+<li><code>hasPreviousPage: page &gt;= 1</code> (should be <code>&gt; 1</code>).</li>
+<li>Field names misspelled (<code>hasNextpage</code>). Copy them from the test.</li></ul></section>
+
+<section><h2><span class="n">4</span>Cache key</h2>
+<p class="look">Look in: the line that builds <code>cacheKey</code>. Symptom: two equivalent requests (<code>page=0&amp;limit=250</code> and <code>page=1&amp;limit=100</code>) make two cache entries, but the test expects size 1.</p>
+<pre class="bad">const cacheKey = `events:${<mark>req.query.status</mark>}:${<mark>req.query.category</mark>}:${<mark>req.query.page</mark>}:${<mark>req.query.limit</mark>}`;
+// raw strings, and "undefined" ends up inside the key</pre>
+<pre class="ok">const cacheKey = `events:${<mark>status || 'all'</mark>}:${<mark>category || 'all'</mark>}:${<mark>page</mark>}:${<mark>limit</mark>}`;
+// built from the NORMALIZED page and limit variables</pre>
+<h3>Common mistakes</h3><ul>
+<li>Building the key before normalizing, so it captures raw input.</li>
+<li>Leaving a param out of the key (wrong data served for other filters).</li>
+<li>Dropping the <code>events:</code> prefix, which makes step 6 impossible.</li></ul></section>
+
+<section><h2><span class="n">5</span>CacheService: prefix deletion</h2>
+<p class="look">Look in: the cache class (Map or Redis wrapper). The code has a hint comment asking for a method that deletes keys starting with a prefix.</p>
+<pre class="bad">clear() { this.store.clear(); }
+<mark>// no deleteByPrefix</mark></pre>
+<pre class="ok">clear() { this.store.clear(); }
+<mark>deleteByPrefix(prefix) {
+  for (const key of this.store.keys()) {
+    if (key.startsWith(prefix)) this.store.delete(key);
+  }
+}</mark></pre>
+<h3>Common mistakes</h3><ul>
+<li>Calling <code>this.store.startsWith</code> (a Map has no such method; check each <code>key</code>).</li>
+<li>Deleting only one exact key. A listing has many variants, so use the prefix.</li>
+<li>Writing it, then never calling it (step 6).</li></ul></section>
+
+<section><h2><span class="n">6</span>Invalidate the cache on writes</h2>
+<p class="look">Look in: <code>app.post</code> and <code>app.patch</code> (and <code>delete</code> if present). Symptom: after a POST or PATCH, the GET still returns old data.</p>
+<pre class="bad">app.post('/api/events', (req, res) =&gt; {
+  const newEvent = repo.createEvent(req.body);
+  <mark>// TODO: invalidate cached lists</mark>
+  res.status(201).json(newEvent);
+});</pre>
+<pre class="ok">app.post('/api/events', (req, res) =&gt; {
+  const newEvent = repo.createEvent(req.body);
+  <mark>app.locals.cache.deleteByPrefix('events:');</mark>   // after the change, before responding
+  res.status(201).json(newEvent);
+});</pre>
+<h3>Common mistakes</h3><ul>
+<li>Invalidating before the data changes, so a request can re-cache the old data.</li>
+<li>Fixing POST but forgetting PATCH (or DELETE).</li>
+<li>Prefix typo: <code>'event:'</code> vs <code>'events:'</code> silently deletes nothing.</li>
+<li>Calling <code>this.cache</code> or <code>cache</code> when the variable is <code>app.locals.cache</code>.</li></ul></section>
+
+<section><h2><span class="n">7</span>Status codes and missing-data handling</h2>
+<p class="look">Look in: PATCH and any route that takes an <code>:id</code>. Symptom: a test expects 404 or 400 and gets 200. Usually a secondary fix, so do it after steps 1-6.</p>
+<pre class="bad">app.patch('/api/events/:id/status', (req, res) =&gt; {
+  repo.updateStatus(req.params.id, req.body.status);
+  res.<mark>status(200).send()</mark>;    // 200 even when the id does not exist
+});</pre>
+<pre class="ok">app.patch('/api/events/:id/status', (req, res) =&gt; {
+  const updated = repo.updateStatus(req.params.id, req.body.status);
+  <mark>if (!updated) return res.status(404).json({ error: 'Event not found' });</mark>
+  app.locals.cache.deleteByPrefix('events:');
+  res.status(200).json(updated);
+});</pre>
+<h3>Common mistakes</h3><ul>
+<li>Missing <code>return</code> before the early <code>res</code>, which causes "Cannot set headers after they are sent".</li>
+<li>Creating with 200 instead of <code>201</code>.</li>
+<li>Invalidating the cache even though nothing changed (404 path).</li></ul></section>
+
+<section><h2><span class="n">8</span>Only if the repo uses Redis: async traps</h2>
+<p class="look">Look in: every <code>cache.get / set / del</code> call. Symptom: responses of <code>{}</code>, the cache always "hits", or <code>Promise { &lt;pending&gt; }</code> in logs.</p>
+<pre class="bad">app.get('/api/events', <mark>(req, res)</mark> =&gt; {
+  const cached = <mark>redis.get(key)</mark>;          // a Promise, always truthy
+  if (cached) return res.json(cached);
+  ...
+  redis.set(key, <mark>body</mark>);                    // object, must be a string
+});</pre>
+<pre class="ok">app.get('/api/events', <mark>async</mark> (req, res, next) =&gt; {
+  try {
+    const cached = <mark>await</mark> redis.get(key);
+    if (cached) return res.json(<mark>JSON.parse(cached)</mark>);
+    ...
+    <mark>await</mark> redis.set(key, <mark>JSON.stringify(body)</mark>, { EX: 60 });
+    res.json(body);
+  } catch (err) { next(err); }
+});</pre>
+<h3>Common mistakes</h3><ul>
+<li>One missing <code>await</code> anywhere in the chain (also on <code>deleteByPrefix</code> in POST and PATCH).</li>
+<li>Skipping <code>JSON.stringify</code> on write or <code>JSON.parse</code> on read.</li>
+<li>Never calling <code>await client.connect()</code> at startup.</li>
+<li>Using <code>KEYS *</code> for prefix deletion. Use <code>scanIterator</code> with <code>MATCH: 'events:*'</code>.</li>
+<li>Using <code>await</code> inside <code>forEach</code>. Use <code>for...of</code> instead.</li></ul></section>
+
+<section><h2><span class="n">9</span>Final pass</h2>
+<ul><li>Remove the debug <code>console.log</code> lines.</li><li>Run the whole suite once more: <code>npx jest</code>.</li><li>Reproduce one case by hand: <code>curl "localhost:3000/api/events?page=-5&amp;limit=250"</code> should return page 1, limit 100.</li></ul></section>
+</main></body></html>
